@@ -1,0 +1,109 @@
+// Package cli is the cobra adapter — prmap's command-line presentation layer.
+// It parses flags, will call the pure core for every operation, and renders
+// the result. It holds no domain logic. stdout carries pipeable payload only;
+// diagnostics and error envelopes go to stderr.
+package cli
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"os/signal"
+	"syscall"
+
+	"github.com/spf13/cobra"
+
+	"github.com/akira-toriyama/prmap/internal/core"
+	"github.com/akira-toriyama/prmap/internal/version"
+)
+
+// out/errOut are the single funnel for process output: stdout = payload,
+// stderr = diagnostics. No other file writes to os.Stdout/os.Stderr directly.
+var (
+	out    io.Writer = os.Stdout
+	errOut io.Writer = os.Stderr
+)
+
+// Execute builds the root command, runs it, and maps the result to the
+// exit-code contract: 0 ok / 1 not-found|empty / 2 bad-usage|validation /
+// 3+ internal|IO. On a non-zero exit it prints {"error":{...}} to stderr. It
+// is the only place that decides the process exit code; main is just
+// os.Exit(cli.Execute()).
+//
+// Signals: the root context cancels on the first SIGINT/SIGTERM so in-flight
+// subprocess/API work can unwind gracefully; the deferred stop restores the
+// default disposition, so a second Ctrl-C hard-kills a wedged process.
+func Execute() int {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	go func() {
+		<-ctx.Done()
+		stop() // restore default disposition: a second Ctrl-C terminates hard
+	}()
+
+	root := newRootCmd()
+	err := root.ExecuteContext(ctx)
+	if err == nil {
+		return int(core.CodeOK)
+	}
+	// Core code always returns *core.Error; a bare error here can only be a
+	// cobra flag/arg parse problem, which is a usage error by contract.
+	ce := core.AsError(err)
+	if ce == nil {
+		ce = &core.Error{Code: core.CodeValidation, Msg: err.Error()}
+	}
+	renderError(ce)
+	return int(ce.Code)
+}
+
+func newRootCmd() *cobra.Command {
+	root := &cobra.Command{
+		Use:   "prmap <owner/repo#N> [path]",
+		Short: "Tiered PR diff reader: file map first, per-file patches within a byte budget",
+		Long: "prmap reads a large pull-request diff in tiers so an AI coding agent never\n" +
+			"has to pull the whole thing into context: first a compact file map (dirs,\n" +
+			"files, +/- counts, generated-file collapse), then the patch of just the files\n" +
+			"that matter, hard-capped by a byte budget.\n\n" +
+			"Planned grammar (design: docs/design.md — not implemented yet):\n" +
+			"  prmap owner/repo#123                                        # tier 1: file map (few KB)\n" +
+			"  prmap owner/repo#123 app/src/split/central.c --budget 8000  # tier 2: one file's patch\n" +
+			"  prmap owner/repo#123 --grep SYMBOL                          # which files/hunks touch SYMBOL",
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		Version:       version.Resolve().String(),
+		// Pre-v0: a real invocation fails loudly instead of silently printing
+		// help — an agent must not mistake a no-op for success. Bare `prmap`
+		// still shows help.
+		Args: cobra.ArbitraryArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 0 {
+				return cmd.Help()
+			}
+			return core.Internalf("not-implemented",
+				"prmap is a pre-v0 scaffold — nothing is implemented yet (see docs/design.md)")
+		},
+	}
+	root.SetOut(out)
+	root.SetErr(errOut)
+	return root
+}
+
+// renderError prints the structured error envelope to stderr — never stdout,
+// so piping the payload into jq stays clean.
+func renderError(e *core.Error) {
+	env := map[string]any{"code": int(e.Code), "message": e.Msg}
+	if e.ID != "" {
+		env["id"] = e.ID
+	}
+	if e.Details != nil {
+		env["details"] = e.Details
+	}
+	b, err := json.Marshal(map[string]any{"error": env})
+	if err != nil {
+		fmt.Fprintln(errOut, e.Msg)
+		return
+	}
+	fmt.Fprintln(errOut, string(b))
+}
