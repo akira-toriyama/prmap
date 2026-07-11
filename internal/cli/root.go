@@ -1,6 +1,6 @@
 // Package cli is the cobra adapter — prmap's command-line presentation layer.
-// It parses flags, will call the pure core for every operation, and renders
-// the result. It holds no domain logic. stdout carries pipeable payload only;
+// It parses flags, calls the pure core and the app coordinator, and renders the
+// result. It holds no domain logic. stdout carries pipeable payload only;
 // diagnostics and error envelopes go to stderr.
 package cli
 
@@ -15,7 +15,10 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/akira-toriyama/prmap/internal/app"
+	"github.com/akira-toriyama/prmap/internal/cache"
 	"github.com/akira-toriyama/prmap/internal/core"
+	"github.com/akira-toriyama/prmap/internal/gh"
 	"github.com/akira-toriyama/prmap/internal/version"
 )
 
@@ -25,6 +28,13 @@ var (
 	out    io.Writer = os.Stdout
 	errOut io.Writer = os.Stderr
 )
+
+// newService builds the coordinator. It is a package var so tests can inject a
+// fake Fetcher/Cache without touching the network or the real gh binary. diag
+// carries verbose cache/transport diagnostics (io.Discard when quiet).
+var newService = func(diag io.Writer) *app.Service {
+	return &app.Service{Fetch: gh.New(), Cache: cache.Open(diag), Diag: diag}
+}
 
 // Execute builds the root command, runs it, and maps the result to the
 // exit-code contract: 0 ok / 1 not-found|empty / 2 bad-usage|validation /
@@ -48,43 +58,73 @@ func Execute() int {
 	if err == nil {
 		return int(core.CodeOK)
 	}
-	// Core code always returns *core.Error; a bare error here can only be a
-	// cobra flag/arg parse problem, which is a usage error by contract.
+	// Core/app code and the flag/arg validators all return *core.Error (flag
+	// errors are wrapped as CodeValidation by SetFlagErrorFunc below). A bare
+	// error that reaches here is therefore an unclassified failure — e.g. a
+	// stdout write error surfaced by the JSON encoder — which is internal by
+	// contract, matching core.ExitCode. It must NOT fall back to usage(2).
 	ce := core.AsError(err)
 	if ce == nil {
-		ce = &core.Error{Code: core.CodeValidation, Msg: err.Error()}
+		ce = &core.Error{Code: core.CodeInternal, Msg: err.Error()}
 	}
 	renderError(ce)
 	return int(ce.Code)
 }
 
+// options collects the parsed flags for one run.
+type options struct {
+	refresh    bool
+	noCache    bool
+	noCollapse bool
+	verbose    bool
+}
+
 func newRootCmd() *cobra.Command {
+	opts := &options{}
 	root := &cobra.Command{
-		Use:   "prmap <owner/repo#N> [path]",
+		Use:   "prmap <owner/repo#N>",
 		Short: "Tiered PR diff reader: file map first, per-file patches within a byte budget",
 		Long: "prmap reads a large pull-request diff in tiers so an AI coding agent never\n" +
 			"has to pull the whole thing into context: first a compact file map (dirs,\n" +
 			"files, +/- counts, generated-file collapse), then the patch of just the files\n" +
 			"that matter, hard-capped by a byte budget.\n\n" +
-			"Planned grammar (design: docs/design.md — not implemented yet):\n" +
 			"  prmap owner/repo#123                                        # tier 1: file map (few KB)\n" +
+			"  prmap https://github.com/owner/repo/pull/123                # a PR URL works too\n\n" +
+			"Planned (not implemented yet — see docs/design.md):\n" +
 			"  prmap owner/repo#123 app/src/split/central.c --budget 8000  # tier 2: one file's patch\n" +
-			"  prmap owner/repo#123 --grep SYMBOL                          # which files/hunks touch SYMBOL",
+			"  prmap owner/repo#123 --grep SYMBOL                          # which files/hunks touch SYMBOL\n\n" +
+			"The /files response is cached on disk keyed by the PR head SHA, so the map and\n" +
+			"every future per-file read come from one fetch. Override the cache root with\n" +
+			"PRMAP_CACHE_DIR.",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		Version:       version.Resolve().String(),
-		// Pre-v0: a real invocation fails loudly instead of silently printing
-		// help — an agent must not mistake a no-op for success. Bare `prmap`
-		// still shows help.
-		Args: cobra.ArbitraryArgs,
+		// Exactly one PR ref. A bare `prmap` prints help; a second positional is
+		// the reserved tier-2 file path, which is not implemented yet.
+		Args: func(_ *cobra.Command, args []string) error {
+			if len(args) > 1 {
+				return core.Validationf("bad-usage",
+					"per-file patch (tier 2) is not implemented yet; pass only owner/repo#N")
+			}
+			return nil
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 0 {
 				return cmd.Help()
 			}
-			return core.Internalf("not-implemented",
-				"prmap is a pre-v0 scaffold — nothing is implemented yet (see docs/design.md)")
+			return runMap(cmd.Context(), args[0], opts)
 		},
 	}
+	// A flag-parse failure is a usage error: wrap it as *core.Error so it exits
+	// 2 with the structured envelope, and so the only bare error that can reach
+	// Execute is a genuine internal failure.
+	root.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
+		return core.Validationf("bad-flag", "%v", err)
+	})
+	root.Flags().BoolVar(&opts.refresh, "refresh", false, "skip the cache read but write the fresh result back")
+	root.Flags().BoolVar(&opts.noCache, "no-cache", false, "never read or write the disk cache (fetch fresh, discard)")
+	root.Flags().BoolVar(&opts.noCollapse, "no-collapse", false, "list every file in the tree (disable generated-file collapse)")
+	root.Flags().BoolVar(&opts.verbose, "verbose", false, "emit cache/transport diagnostics to stderr")
 	root.SetOut(out)
 	root.SetErr(errOut)
 	return root
