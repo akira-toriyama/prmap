@@ -1,0 +1,34 @@
+[
+  {
+    "filename": "app/src/split/central.c",
+    "status": "modified",
+    "additions": 210,
+    "deletions": 13,
+    "changes": 223,
+    "patch": "@@ -1,3 +1,4 @@\n line\n+added\n"
+  },
+  {
+    "filename": "app/src/pointing/input_listener.c",
+    "status": "added",
+    "additions": 373,
+    "deletions": 0,
+    "changes": 373,
+    "patch": "@@ -0,0 +1,3 @@\n+a\n+b\n+c\n"
+  },
+  {
+    "filename": "app/include/zmk/pointing.h",
+    "previous_filename": "app/include/zmk/mouse.h",
+    "status": "renamed",
+    "additions": 2,
+    "deletions": 2,
+    "changes": 4,
+    "patch": "@@ -1 +1 @@\n-old\n+new\n"
+  },
+  {
+    "filename": "app/tests/pointing/mkp/native_posix.keymap",
+    "status": "modified",
+    "additions": 8,
+    "deletions": 1,
+    "changes": 9
+  }
+]

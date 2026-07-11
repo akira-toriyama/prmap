@@ -4,6 +4,15 @@
 > refined 2026-07-06). This is the pre-implementation design; verify premises
 > against the linked upstream issues before building on them.
 
+> **Status (2026-07-11): tier 1 shipped.** The file map, the head-SHA disk
+> cache, the `gh api` transport, and the full fetch-error → exit-code mapping
+> are implemented (`internal/{core,gh,cache,app,cli}`). Cache keying is **head
+> SHA only** — a deliberate departure from the "head+base" idea below, because
+> keying on base too would refetch on every base-branch advance and defeat the
+> cache on any PR against an active branch. Next: tier 2 (per-file budget patch,
+> hunk-granular) reading the same cached `/files` bytes, then `--grep` and
+> hunk-level tier 3.
+
 ## What
 
 A tiered PR diff reader: tier 1 is a compact file map (a few KB — dirs, files,
