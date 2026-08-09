@@ -30,7 +30,6 @@ func envFor(k Key, files string) Envelope {
 	}
 }
 
-// jsonFiles walks root and returns every *.json path (cache blobs).
 func jsonFiles(t *testing.T, root string) []string {
 	t.Helper()
 	var out []string
